@@ -23,8 +23,9 @@ case class ChatMessage (
 )
 
 case class ToolParam(
+    httpHostname: String,
     httpPostPath: String,
-    // httpPostHeaders: Map[String, String],
+    httpPostHeaders: Map[String, String],
     HttpPostBody: String,
 )
 
@@ -35,7 +36,52 @@ case class ChatResponse(
 
 object ChatResponseSchema {
   def apply(): Json= {
-    json.Json.schema[ChatResponse].asCirce(Draft04())
+    // json.Json.schema[ChatResponse].asCirce(Draft04())
+    parse("""
+      |{
+      |  "$schema": "https://json-schema.org/draft/2020-12/schema ",
+      |  "$id": "https://example.com/ChatResponse.schema.json ",
+      |  "title": "ChatResponse",
+      |  "type": "object",
+      |  "properties": {
+      |    "callTool": {
+      |      "type": ["object", "null"],
+      |      "properties": {
+      |        "httpHostname": {
+      |          "type": ["string", "null"]
+      |        },
+      |        "httpPostPath": {
+      |          "type": ["string", "null"]
+      |        },
+      |        "httpPostHeaders": {
+      |          "type": ["object", "null"],
+      |          "additionalProperties": {
+      |            "type": ["string", "null"]
+      |          }
+      |        },
+      |        "HttpPostBody": {
+      |          "type": ["string", "null"]
+      |        }
+      |      },
+      |      "required": [
+      |        "httpHostname",
+      |        "httpPostPath",
+      |        "httpPostHeaders",
+      |        "HttpPostBody"
+      |      ],
+      |      "additionalProperties": false
+      |    },
+      |    "toUser": {
+      |      "type": ["string", "null"]
+      |    }
+      |  },
+      |  "required": [
+      |    "callTool",
+      |    "toUser"
+      |  ],
+      |  "additionalProperties": false
+      |}
+      |""".stripMargin).toTry.get
   }
 }
 
@@ -53,7 +99,7 @@ case class ChatRequest(
     input: Seq[ChatMessage],
     instructions: String = "You are a helpful assistant.",
     model: String = "gpt-4o",
-    // text: TextParam = TextParam(),
+    text: TextParam = TextParam(),
 )
 
 case class ToolDef(
@@ -63,19 +109,12 @@ case class ToolDef(
 
 def getSystemPrompt(tools: Seq[ToolDef]): String = {
   val jsonSchema = ChatResponseSchema().toString
+
   s"""You are a helpful assistant.
     |
     |You have many tools to use by sending a http request to some API servers. You must response as a Json format that
-    |follow the Json schema definition, which either request a call to one of the APIs, or response to user directly
-    |if there is no need to request to any tool. Response the Json content only without any code block quote.
-    |
-    |Here is the Json schema you must follow for the response:
-    |
-    |$jsonSchema
-    |
-    |Here are the OpenAPI definition of the tools:
-    |
-    |--- End of tool definition.
+    |follow the Json schema definition, which either request a call to one of the APIs with `callTool` field, or
+    |response to user directly with `toUser` field if there is no need to request to any tool or you need more information from the user.
     |
     |""".stripMargin
 }
@@ -93,6 +132,7 @@ def sendLLMRequest(req: ChatRequest): Try[ChatResponse] = {
       "Content-Type" -> "application/json",
     ),
     data = postData,
+    readTimeout = 600000,
   )
   val resText = r.text()
   println("Response:")
@@ -111,9 +151,19 @@ def sendLLMRequest(req: ChatRequest): Try[ChatResponse] = {
 }
 
 def run() = {
+  val openApiFile = scala.io.Source.fromFile("swagger.json")
+  val openApiDefs = try openApiFile.mkString finally openApiFile.close()
   val req = ChatRequest(
     input = Seq(
-      ChatMessage(role = "user", content = "hello"),
+      ChatMessage(role = "developer", content =
+        s"""
+          |
+          |Here are the OpenAPI definition of the tools:
+          |
+          |$openApiDefs
+          |
+          |""".stripMargin),
+      ChatMessage(role = "user", content = "What is the weather today?"),
     ),
     instructions = getSystemPrompt(Seq()),
   )
