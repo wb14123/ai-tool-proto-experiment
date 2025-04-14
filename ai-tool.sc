@@ -35,7 +35,7 @@ case class ChatResponse(
 )
 
 object ChatResponseSchema {
-  def apply(): Json= {
+  val json: Json =
     // json.Json.schema[ChatResponse].asCirce(Draft04())
     parse("""
       |{
@@ -82,13 +82,12 @@ object ChatResponseSchema {
       |  "additionalProperties": false
       |}
       |""".stripMargin).toTry.get
-  }
 }
 
 case class TextFormat(
     `type`: String = "json_schema",
     name: String = "entities",
-    schema: Json = ChatResponseSchema(),
+    schema: Json = ChatResponseSchema.json,
     strict: Boolean = true,
 )
 
@@ -109,8 +108,6 @@ case class ToolDef(
 )
 
 def getSystemPrompt(tools: Seq[ToolDef]): String = {
-  val jsonSchema = ChatResponseSchema().toString
-
   s"""You are a helpful assistant.
     |
     |You have many tools to use by sending a http request to some API servers. You must response as a Json format that
@@ -169,8 +166,6 @@ def callTool(toolParam: ToolParam): Try[String] = {
 
 @tailrec
 def loop(req: ChatRequest, lastResponse: Option[Try[ChatResponse]], waitForUser: Boolean): Unit = {
-  println("Press enter to continue")
-  readLine()
   if (waitForUser) {
     println("Wait for user input:")
     val userInput = readLine()
