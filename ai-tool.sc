@@ -23,6 +23,7 @@ case class ChatMessage (
 )
 
 case class ToolParam(
+    httpRequestHost: String,
     httpRequestPath: String,
     httpRequestHeaders: Option[Map[String, String]],
     httpRequestMethod: String,
@@ -34,60 +35,62 @@ case class ChatResponse(
     toUser: Option[String] = None,
 )
 
-object ChatResponseSchema {
-  val json: Json =
-    // json.Json.schema[ChatResponse].asCirce(Draft04())
-    parse("""
-      |{
-      |  "$schema": "https://json-schema.org/draft/2020-12/schema ",
-      |  "$id": "https://example.com/ChatResponse.schema.json ",
-      |  "title": "ChatResponse",
-      |  "type": "object",
-      |  "properties": {
-      |    "callTool": {
-      |      "type": ["object", "null"],
-      |      "properties": {
-      |        "httpRequestPath": {
-      |          "type": ["string"]
-      |        },
-      |        "httpRequestMethod": {
-      |          "type": ["string"]
-      |        },
-      |        "httpRequestHeaders": {
-      |          "type": ["object", "null"],
-      |          "additionalProperties": {
-      |            "type": ["string", "null"]
-      |          }
-      |        },
-      |        "HttpPostBody": {
-      |          "type": ["string", "null"]
-      |        }
-      |      },
-      |      "required": [
-      |        "httpRequestPath",
-      |        "httpRequestMethod",
-      |        "httpRequestHeaders",
-      |        "HttpPostBody"
-      |      ],
-      |      "additionalProperties": false
-      |    },
-      |    "toUser": {
-      |      "type": ["string", "null"]
-      |    }
-      |  },
-      |  "required": [
-      |    "callTool",
-      |    "toUser"
-      |  ],
-      |  "additionalProperties": false
-      |}
-      |""".stripMargin).toTry.get
-}
+val chatResponseSchema: Json =
+  // json.Json.schema[ChatResponse].asCirce(Draft04())
+  parse("""
+    |{
+    |  "$schema": "https://json-schema.org/draft/2020-12/schema ",
+    |  "$id": "https://example.com/ChatResponse.schema.json ",
+    |  "title": "ChatResponse",
+    |  "type": "object",
+    |  "properties": {
+    |    "callTool": {
+    |      "type": ["object", "null"],
+    |      "properties": {
+    |        "httpRequestHost": {
+    |          "type": ["string"]
+    |        },
+    |        "httpRequestPath": {
+    |          "type": ["string"]
+    |        },
+    |        "httpRequestMethod": {
+    |          "type": ["string"]
+    |        },
+    |        "httpRequestHeaders": {
+    |          "type": ["object", "null"],
+    |          "additionalProperties": {
+    |            "type": ["string", "null"]
+    |          }
+    |        },
+    |        "HttpPostBody": {
+    |          "type": ["string", "null"]
+    |        }
+    |      },
+    |      "required": [
+    |        "httpRequestHost",
+    |        "httpRequestPath",
+    |        "httpRequestMethod",
+    |        "httpRequestHeaders",
+    |        "HttpPostBody"
+    |      ],
+    |      "additionalProperties": false
+    |    },
+    |    "toUser": {
+    |      "type": ["string", "null"]
+    |    }
+    |  },
+    |  "required": [
+    |    "callTool",
+    |    "toUser"
+    |  ],
+    |  "additionalProperties": false
+    |}
+    |""".stripMargin).toTry.get
 
 case class TextFormat(
     `type`: String = "json_schema",
     name: String = "entities",
-    schema: Json = ChatResponseSchema.json,
+    schema: Json = chatResponseSchema,
     strict: Boolean = true,
 )
 
@@ -95,26 +98,43 @@ case class TextParam(
     format: TextFormat = TextFormat()
 )
 
+
+val systemPrompt: String =
+  s"""You are a helpful assistant.
+     |
+     |You have many tools to use by sending a http request to some API servers. You must response as a Json format that
+     |follow the Json schema definition, which either request a call to one of the APIs with `callTool` field, or
+     |response to user directly with `toUser` field if there is no need to request to any tool or you need more information from the user.
+     |
+     |""".stripMargin
+
 case class ChatRequest(
     input: Seq[ChatMessage],
-    instructions: String = "You are a helpful assistant.",
+    instructions: String = systemPrompt,
     model: String = "gpt-4o",
     text: TextParam = TextParam(),
 )
 
 case class ToolDef(
-    openAPIFile: String,
     httpHost: String,
-)
+    openAPIPath: String,
+    authPath: Option[String] = None,
+) {
+  def prompt: String = {
+    s"""----
+       |Tool server host: $httpHost
+       |
+       |Tool's OpenAPI definition:
+       |$openAPIDef
+       |
+       |----
+       |
+       |""".stripMargin
+  }
 
-def getSystemPrompt(tools: Seq[ToolDef]): String = {
-  s"""You are a helpful assistant.
-    |
-    |You have many tools to use by sending a http request to some API servers. You must response as a Json format that
-    |follow the Json schema definition, which either request a call to one of the APIs with `callTool` field, or
-    |response to user directly with `toUser` field if there is no need to request to any tool or you need more information from the user.
-    |
-    |""".stripMargin
+  private def openAPIDef: String = {
+    requests.get(httpHost + openAPIPath).text()
+  }
 }
 
 def sendLLMRequest(req: ChatRequest): Try[ChatResponse] = {
@@ -149,7 +169,7 @@ def sendLLMRequest(req: ChatRequest): Try[ChatResponse] = {
 }
 
 def callTool(toolParam: ToolParam): Try[String] = {
-  val hostname = "http://localhost:8000"
+  val hostname = toolParam.httpRequestHost
   if (toolParam.httpRequestMethod.toLowerCase.equals("get")) {
     Try(requests.get(hostname + toolParam.httpRequestPath, headers=toolParam.httpRequestHeaders.getOrElse(Map())).text())
   } else if (toolParam.httpRequestMethod.toLowerCase.equals("post")) {
@@ -195,8 +215,11 @@ def loop(req: ChatRequest, lastResponse: Option[Try[ChatResponse]], waitForUser:
 }
 
 def run() = {
-  val openApiFile = scala.io.Source.fromFile("swagger.json")
-  val openApiDefs = try openApiFile.mkString finally openApiFile.close()
+  val tools = Seq(
+    ToolDef(httpHost = "http://localhost:8000", openAPIPath = "/openapi.json"),
+  )
+  val toolsPrompt = tools.map(_.prompt).mkString("\n")
+
   val req = ChatRequest(
     input = Seq(
       ChatMessage(role = "developer", content =
@@ -204,11 +227,11 @@ def run() = {
           |
           |Here are the OpenAPI definition of the tools:
           |
-          |$openApiDefs
+          |$toolsPrompt
           |
           |""".stripMargin),
     ),
-    instructions = getSystemPrompt(Seq()),
+    instructions = systemPrompt,
   )
   loop(req, None, waitForUser = true)
 }
