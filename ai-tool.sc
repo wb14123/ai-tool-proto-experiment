@@ -12,7 +12,9 @@ import io.circe.syntax._
 import io.circe._
 import io.circe.parser._
 
-import scala.util.{Success, Try, Failure}
+import java.time.format.DateTimeFormatter
+import java.time.ZonedDateTime
+import scala.util.{Failure, Try}
 import scala.io.StdIn.readLine
 import scala.annotation.tailrec
 
@@ -35,13 +37,10 @@ case class ChatResponse(
     toUser: Option[String] = None,
 )
 
-val chatResponseSchema: Json =
+val chatResponseSchemaStr: String =
   // json.Json.schema[ChatResponse].asCirce(Draft04())
-  parse("""
+  """
     |{
-    |  "$schema": "https://json-schema.org/draft/2020-12/schema ",
-    |  "$id": "https://example.com/ChatResponse.schema.json ",
-    |  "title": "ChatResponse",
     |  "type": "object",
     |  "properties": {
     |    "callTool": {
@@ -85,7 +84,9 @@ val chatResponseSchema: Json =
     |  ],
     |  "additionalProperties": false
     |}
-    |""".stripMargin).toTry.get
+    |""".stripMargin
+
+val chatResponseSchema: Json = parse(chatResponseSchemaStr).toTry.get
 
 case class TextFormat(
     `type`: String = "json_schema",
@@ -99,14 +100,39 @@ case class TextParam(
 )
 
 
-val systemPrompt: String =
+val systemPrompt: String = {
+  /*
+  TODO: authentication flow.
+
+  It's better to add another action other than `callTool` and `toUser`, which opens the authentication url directly
+  in the browser and use a callback url to send the instruction back to the agent without user copying anything.
+
+  But since this is just a PoC, just keep it simple here.
+   */
   s"""You are a helpful assistant.
      |
-     |You have many tools to use by sending a http request to some API servers. You must response as a Json format that
-     |follow the Json schema definition, which either request a call to one of the APIs with `callTool` field, or
-     |response to user directly with `toUser` field if there is no need to request to any tool or you need more information from the user.
+     |You have many tools to use by sending a http request to some API servers. Your response must be Json that
+     |follows the Json schema definition:
+     |
+     |$chatResponseSchemaStr
+     |
+     |Either request a call to one of the APIs with `callTool` field, or
+     |response to user directly with `toUser` field if there is no need to request to any tool or you need more
+     |information from the user.
+     |
+     |Each tool has an optional login URL that you can ask the user to open in the browser. Then user will copy the
+     |authentication instruction back to you and you can follow the instruction to do the authentication with the
+     |tool server.
+     |
+     |Important:
+     |
+     |* Response only the JSON body. Never quote the response in something like json```...```.
+     |* Never response to user directly without using the `toUser` field with a Json response.
+     |* Only one of `callTool` and `toUser` field should be filled.
+     |* Always include the `http` or `https` part for the `httpRequestHost` field.
      |
      |""".stripMargin
+}
 
 case class ChatRequest(
     input: Seq[ChatMessage],
@@ -118,12 +144,14 @@ case class ChatRequest(
 case class ToolDef(
     httpHost: String,
     openAPIPath: String,
-    authPath: Option[String] = None,
+    authUrl: Option[String] = None,
 ) {
   def prompt: String = {
+    val authUrlPrompt = authUrl.map(url => s"Tool login URL: $url\n").getOrElse("")
     s"""----
        |Tool server host: $httpHost
        |
+       |$authUrlPrompt
        |Tool's OpenAPI definition:
        |$openAPIDef
        |
@@ -140,7 +168,9 @@ case class ToolDef(
 def sendLLMRequest(req: ChatRequest): Try[ChatResponse] = {
   val llmEndpoint = "https://api.openai.com/v1/responses"
   val token = sys.env("OPENAI_API_KEY")
-  val postData =  req.asJson.toString
+  val timeStr = ZonedDateTime.now().format(DateTimeFormatter.ISO_ZONED_DATE_TIME)
+  val reqWithTime = req.copy(instructions = req.instructions + s"\n\nThe current time is $timeStr .")
+  val postData =  reqWithTime.asJson.toString
   println("Sending request ...")
   println(postData)
   val r = requests.post(
@@ -216,7 +246,8 @@ def loop(req: ChatRequest, lastResponse: Option[Try[ChatResponse]], waitForUser:
 
 def run() = {
   val tools = Seq(
-    ToolDef(httpHost = "http://localhost:8000", openAPIPath = "/openapi.json"),
+    ToolDef(httpHost = "http://localhost:8881", openAPIPath = "/swagger.json",
+      authUrl = Some("http://localhost:8084/login?redirect_url=/llm_auth")),
   )
   val toolsPrompt = tools.map(_.prompt).mkString("\n")
 
