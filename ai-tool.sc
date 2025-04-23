@@ -246,8 +246,8 @@ def loop(req: ChatRequest, lastResponse: Option[Try[ChatResponse]], waitForUser:
 
 def run() = {
   val tools = Seq(
-    ToolDef(httpHost = "http://localhost:8881", openAPIPath = "/swagger.json",
-      authUrl = Some("http://localhost:8084/login?redirect_url=/llm_auth")),
+    ToolDef(httpHost = "https://grpc.rssbrain.com", openAPIPath = "/swagger.json",
+      authUrl = Some("http://app.rssbrain.com/login?redirect_url=/llm_auth")),
   )
   val toolsPrompt = tools.map(_.prompt).mkString("\n")
 
