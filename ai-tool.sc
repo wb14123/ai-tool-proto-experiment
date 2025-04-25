@@ -12,12 +12,26 @@ import io.circe.syntax._
 import io.circe._
 import io.circe.parser._
 
+import java.io.FileWriter
 import java.time.format.DateTimeFormatter
 import java.time.ZonedDateTime
 import scala.util.{Failure, Try}
 import scala.io.StdIn.readLine
 import scala.annotation.tailrec
 
+val LLM_ENDPOINT = "https://api.openai.com"
+val LLM_MODEL = "gpt-4o"
+
+/*
+val LLM_ENDPOINT = "http://127.0.0.1:11434"
+val LLM_MODEL = "deepseek-r1:7b"
+ */
+
+val logFile = new FileWriter("./log.txt", true)
+def logToFile(msg: String): Unit = {
+  logFile.write(msg + "\n")
+  logFile.flush()
+}
 
 case class ChatMessage (
     role: String,
@@ -88,19 +102,21 @@ val chatResponseSchemaStr: String =
 
 val chatResponseSchema: Json = parse(chatResponseSchemaStr).toTry.get
 
-case class TextFormat(
-    `type`: String = "json_schema",
+case class JsonSchema(
     name: String = "entities",
     schema: Json = chatResponseSchema,
     strict: Boolean = true,
 )
 
-case class TextParam(
-    format: TextFormat = TextFormat()
+
+case class ResponseFormat(
+    `type`: String = "json_schema",
+    json_schema: JsonSchema = JsonSchema(),
 )
 
 
 val systemPrompt: String = {
+  val timeStr = ZonedDateTime.now().format(DateTimeFormatter.ISO_ZONED_DATE_TIME)
   /*
   TODO: authentication flow.
 
@@ -110,6 +126,8 @@ val systemPrompt: String = {
   But since this is just a PoC, just keep it simple here.
    */
   s"""You are a helpful assistant.
+     |
+     |The current time is $timeStr.
      |
      |You have many tools to use by sending a http request to some API servers. Your response must be Json that
      |follows the Json schema definition:
@@ -135,10 +153,9 @@ val systemPrompt: String = {
 }
 
 case class ChatRequest(
-    input: Seq[ChatMessage],
-    instructions: String = systemPrompt,
-    model: String = "gpt-4o",
-    text: TextParam = TextParam(),
+    messages: Seq[ChatMessage],
+    model: String = LLM_MODEL,
+    response_format: ResponseFormat= ResponseFormat(),
 )
 
 case class ToolDef(
@@ -166,15 +183,12 @@ case class ToolDef(
 }
 
 def sendLLMRequest(req: ChatRequest): Try[ChatResponse] = {
-  val llmEndpoint = "https://api.openai.com/v1/responses"
   val token = sys.env("OPENAI_API_KEY")
-  val timeStr = ZonedDateTime.now().format(DateTimeFormatter.ISO_ZONED_DATE_TIME)
-  val reqWithTime = req.copy(instructions = req.instructions + s"\n\nThe current time is $timeStr .")
-  val postData =  reqWithTime.asJson.toString
-  println("Sending request ...")
-  println(postData)
+  val postData =  req.asJson.toString
+  logToFile("Sending request ...")
+  logToFile(postData)
   val r = requests.post(
-    llmEndpoint,
+    LLM_ENDPOINT + "/v1/chat/completions",
     headers = Map(
       "Authorization" -> s"Bearer $token",
       "Content-Type" -> "application/json",
@@ -183,15 +197,14 @@ def sendLLMRequest(req: ChatRequest): Try[ChatResponse] = {
     readTimeout = 600000,
   )
   val resText = r.text()
-  println("Response:")
-  println(resText)
+  logToFile("Response:")
+  logToFile(resText)
   parse(resText).toTry.flatMap { j =>
     j.hcursor
-      .downField("output")
+      .downField("choices")
       .downArray
+      .downField("message")
       .downField("content")
-      .downArray
-      .downField("text")
       .as[String]
       .toTry
       .flatMap(decode[ChatResponse](_).toTry)
@@ -199,6 +212,7 @@ def sendLLMRequest(req: ChatRequest): Try[ChatResponse] = {
 }
 
 def callTool(toolParam: ToolParam): Try[String] = {
+  println(s"Calling tool ${toolParam.httpRequestHost}/${toolParam.httpRequestPath} ...")
   val hostname = toolParam.httpRequestHost
   if (toolParam.httpRequestMethod.toLowerCase.equals("get")) {
     Try(requests.get(hostname + toolParam.httpRequestPath, headers=toolParam.httpRequestHeaders.getOrElse(Map())).text())
@@ -219,7 +233,7 @@ def loop(req: ChatRequest, lastResponse: Option[Try[ChatResponse]], waitForUser:
   if (waitForUser) {
     println("Wait for user input:")
     val userInput = readLine()
-    val nextReq = req.copy(input = req.input :+ ChatMessage(role = "user", content = userInput))
+    val nextReq = req.copy(messages = req.messages :+ ChatMessage(role = "user", content = userInput))
     val res = sendLLMRequest(nextReq)
     loop(nextReq, Some(res), waitForUser = false)
   } else {
@@ -229,15 +243,16 @@ def loop(req: ChatRequest, lastResponse: Option[Try[ChatResponse]], waitForUser:
     } else {
       val res = lastResponse.get.get
       val resInput = ChatMessage(role = "assistant", content = res.asJson.toString)
-      println(res)
       if (res.toUser.isDefined) {
-        val nextReq = req.copy(input = req.input :+ resInput)
+        val nextReq = req.copy(messages = req.messages :+ resInput)
+        println("Assistant: " + res.toUser.get)
         loop(nextReq, None, waitForUser = true)
       } else if (res.callTool.isDefined) {
+        logToFile("Calling tool: " + res.callTool.get)
         val toolOutput = callTool(res.callTool.get).toString
-        val nextReq = req.copy(input = req.input :+ resInput :+ ChatMessage(role = "developer", s"Tool Result:\n$toolOutput"))
+        val nextReq = req.copy(messages = req.messages :+ resInput :+ ChatMessage(role = "developer", s"Tool Result:\n$toolOutput"))
         val nextRes = sendLLMRequest(nextReq)
-        println(toolOutput)
+        logToFile("Tool Result: " + toolOutput)
         loop(nextReq, Some(nextRes), waitForUser = false)
       }
     }
@@ -246,13 +261,14 @@ def loop(req: ChatRequest, lastResponse: Option[Try[ChatResponse]], waitForUser:
 
 def run() = {
   val tools = Seq(
-    ToolDef(httpHost = "https://grpc.rssbrain.com", openAPIPath = "/swagger.json",
+    ToolDef(httpHost = "https://grpc-gateway.rssbrain.com", openAPIPath = "/swagger.json",
       authUrl = Some("http://app.rssbrain.com/login?redirect_url=/llm_auth")),
   )
   val toolsPrompt = tools.map(_.prompt).mkString("\n")
 
   val req = ChatRequest(
-    input = Seq(
+    messages = Seq(
+      ChatMessage(role = "system", content = systemPrompt),
       ChatMessage(role = "developer", content =
         s"""
           |
@@ -262,9 +278,9 @@ def run() = {
           |
           |""".stripMargin),
     ),
-    instructions = systemPrompt,
   )
   loop(req, None, waitForUser = true)
+  logFile.close()
 }
 
 
