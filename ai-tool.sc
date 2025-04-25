@@ -138,9 +138,9 @@ val systemPrompt: String = {
      |response to user directly with `toUser` field if there is no need to request to any tool or you need more
      |information from the user.
      |
-     |Each tool has an optional login URL that you can ask the user to open in the browser. Then user will copy the
-     |authentication instruction back to you and you can follow the instruction to do the authentication with the
-     |tool server.
+     |Each tool has an optional authUrl that you can ask the user to open in the browser. If you get authentication
+     | related errors when calling a tool, ask the user to open the authUrl in browser and copy the instruction back,
+     | then use the instruction to try authentication again.
      |
      |Important:
      |
