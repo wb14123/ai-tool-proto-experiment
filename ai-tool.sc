@@ -39,7 +39,7 @@ case class ChatMessage (
 )
 
 case class ToolParam(
-    httpRequestHost: String,
+    httpRequestEndpoint: String,
     httpRequestPath: String,
     httpRequestHeaders: Option[Map[String, String]],
     httpRequestMethod: String,
@@ -60,7 +60,7 @@ val chatResponseSchemaStr: String =
     |    "callTool": {
     |      "type": ["object", "null"],
     |      "properties": {
-    |        "httpRequestHost": {
+    |        "httpRequestEndpoint": {
     |          "type": ["string"]
     |        },
     |        "httpRequestPath": {
@@ -80,7 +80,7 @@ val chatResponseSchemaStr: String =
     |        }
     |      },
     |      "required": [
-    |        "httpRequestHost",
+    |        "httpRequestEndpoint",
     |        "httpRequestPath",
     |        "httpRequestMethod",
     |        "httpRequestHeaders",
@@ -147,7 +147,7 @@ val systemPrompt: String = {
      |* Response only the JSON body. Never quote the response in something like json```...```.
      |* Never response to user directly without using the `toUser` field with a Json response.
      |* Only one of `callTool` and `toUser` field should be filled.
-     |* Always include the `http` or `https` part for the `httpRequestHost` field.
+     |* Always include the `http` or `https` part for the `httpRequestEndpoint` field.
      |
      |""".stripMargin
 }
@@ -159,14 +159,14 @@ case class ChatRequest(
 )
 
 case class ToolDef(
-    httpHost: String,
+    httpEndpoint: String,
     openAPIPath: String,
     authUrl: Option[String] = None,
 ) {
   def prompt: String = {
     val authUrlPrompt = authUrl.map(url => s"Tool login URL: $url\n").getOrElse("")
     s"""----
-       |Tool server host: $httpHost
+       |Tool server endpoint: $httpEndpoint
        |
        |$authUrlPrompt
        |Tool's OpenAPI definition:
@@ -178,7 +178,7 @@ case class ToolDef(
   }
 
   private def openAPIDef: String = {
-    requests.get(httpHost + openAPIPath).text()
+    requests.get(httpEndpoint + openAPIPath).text()
   }
 }
 
@@ -212,8 +212,7 @@ def sendLLMRequest(req: ChatRequest): Try[ChatResponse] = {
 }
 
 def callTool(toolParam: ToolParam): Try[String] = {
-  println(s"Calling tool ${toolParam.httpRequestHost}/${toolParam.httpRequestPath} ...")
-  val hostname = toolParam.httpRequestHost
+  val hostname = toolParam.httpRequestEndpoint
   if (toolParam.httpRequestMethod.toLowerCase.equals("get")) {
     Try(requests.get(hostname + toolParam.httpRequestPath, headers=toolParam.httpRequestHeaders.getOrElse(Map())).text())
   } else if (toolParam.httpRequestMethod.toLowerCase.equals("post")) {
@@ -231,7 +230,7 @@ def callTool(toolParam: ToolParam): Try[String] = {
 @tailrec
 def loop(req: ChatRequest, lastResponse: Option[Try[ChatResponse]], waitForUser: Boolean): Unit = {
   if (waitForUser) {
-    println("Wait for user input:")
+    print("User input: ")
     val userInput = readLine()
     val nextReq = req.copy(messages = req.messages :+ ChatMessage(role = "user", content = userInput))
     val res = sendLLMRequest(nextReq)
@@ -249,7 +248,9 @@ def loop(req: ChatRequest, lastResponse: Option[Try[ChatResponse]], waitForUser:
         loop(nextReq, None, waitForUser = true)
       } else if (res.callTool.isDefined) {
         logToFile("Calling tool: " + res.callTool.get)
-        val toolOutput = callTool(res.callTool.get).toString
+        val toolParam = res.callTool.get
+        println(s"Calling tool ${toolParam.httpRequestEndpoint}/${toolParam.httpRequestPath} ...")
+        val toolOutput = callTool(toolParam).toString
         val nextReq = req.copy(messages = req.messages :+ resInput :+ ChatMessage(role = "developer", s"Tool Result:\n$toolOutput"))
         val nextRes = sendLLMRequest(nextReq)
         logToFile("Tool Result: " + toolOutput)
@@ -261,7 +262,7 @@ def loop(req: ChatRequest, lastResponse: Option[Try[ChatResponse]], waitForUser:
 
 def run() = {
   val tools = Seq(
-    ToolDef(httpHost = "https://grpc-gateway.rssbrain.com", openAPIPath = "/swagger.json",
+    ToolDef(httpEndpoint = "https://grpc-gateway.rssbrain.com", openAPIPath = "/swagger.json",
       authUrl = Some("http://app.rssbrain.com/login?redirect_url=/llm_auth")),
   )
   val toolsPrompt = tools.map(_.prompt).mkString("\n")
